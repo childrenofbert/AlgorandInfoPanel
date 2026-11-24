@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>InfoPanel.Algorand</RootNamespace>
+    <AssemblyName>InfoPanel.Algorand</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\infopanel-1CLONE\InfoPanel.Plugins\InfoPanel.Plugins.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\infopanel-1CLONE\InfoPanel.Plugins.Graphics\InfoPanel.Plugins.Graphics.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+    <PackageReference Include="SkiaSharp" Version="3.119.2">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+    <ItemGroup>
+    <None Update="PluginInfo.ini">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <Target Name="RemoveHostProvidedNativeAssets" AfterTargets="Build">
+    <RemoveDir Directories="$(OutputPath)runtimes" />
+  </Target>
+
+</Project>
