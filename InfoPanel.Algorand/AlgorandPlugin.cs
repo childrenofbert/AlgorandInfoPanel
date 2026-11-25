@@ -16,12 +16,19 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         (Period.Year, "year", "past 365 days"),
     ];
 
-    private static readonly string[] LookLabels = ["Teal and gold", "Gold", "Ice", "Ember", "Plain"];
+    private static readonly string[] LookLabels =
+    [
+        "Teal and gold", "Gold", "Ice", "Ember", "Plain",
+        "Burst", "Medal", "Ribbon", "Confetti", "Ticket", "Spotlight", "Custom picture",
+    ];
+    private static readonly string[] IntroLabels = ["Fade", "Pop", "Rise", "Drop", "Zoom", "Slide in", "Snap"];
+    private static readonly string[] OutroLabels = ["Fade", "Shrink", "Fall", "Zoom out", "Slide out", "Snap"];
     private static readonly string[] LengthLabels = ["Short", "Normal", "Long"];
     private static readonly string[] TimeFormats = ["12h 28m", "12h 28m 10s", "748 min", "12:28:10"];
 
     private readonly PluginText _block = new("block", "Current block", "—");
     private readonly PluginText _status = new("status", "Status", "Stopped");
+    private readonly PluginSensor _stake = new("stake", "Current stake", 0, "ALGO");
     private readonly PluginText _heartbeat = new("heartbeat-age", "Time since heartbeat", "—");
     private readonly PluginText _price = new("price", "ALGO price", "—");
     private readonly PluginText _changeHour = new("price-change-hour", "Change past hour", "—");
@@ -38,6 +45,7 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
     private readonly NodeClient _node = new();
     private readonly StatsStore _stats = new();
     private readonly RewardPainter _painter = new();
+    private readonly CelebrationPicture _picture = new();
     private readonly PriceHistory _prices = new();
     private readonly CancellationTokenSource _lifetime = new();
     private readonly object _priceGate = new();
@@ -48,8 +56,12 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
     private string _dataFolder = "";
     private bool _celebration = true;
     private string _lookLabel = "Teal and gold";
+    private string _introLabel = "Fade";
+    private string _outroLabel = "Fade";
     private string _lengthLabel = "Normal";
     private string _timeFormat = "12h 28m";
+    private string _typedPicture = "";
+    private string _chosenPicture = CelebrationFile.Load();
     private CelebrationLook _look = CelebrationLook.TealGold;
 
     private string? _activeDataDir;
@@ -99,10 +111,28 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         {
             Key = "look",
             DisplayName = "Celebration look",
-            Description = "Colors used when a block reward plays.",
+            Description = "The picture that plays when you are paid. Custom picture uses the file you choose below.",
             Type = PluginConfigType.Choice,
             Value = _lookLabel,
             Options = LookLabels,
+        },
+        new PluginConfigProperty
+        {
+            Key = "intro",
+            DisplayName = "Entrance",
+            Description = "How the celebration comes onto the screen.",
+            Type = PluginConfigType.Choice,
+            Value = _introLabel,
+            Options = IntroLabels,
+        },
+        new PluginConfigProperty
+        {
+            Key = "outro",
+            DisplayName = "Exit",
+            Description = "How the celebration leaves the screen.",
+            Type = PluginConfigType.Choice,
+            Value = _outroLabel,
+            Options = OutroLabels,
         },
         new PluginConfigProperty
         {
@@ -138,6 +168,14 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
             Value = _timeFormat,
             Options = TimeFormats,
         },
+        new PluginConfigProperty
+        {
+            Key = "picture",
+            DisplayName = "Celebration picture",
+            Description = "Full path to a PNG, JPG, or GIF. Leave blank to use Choose celebration picture.",
+            Type = PluginConfigType.String,
+            Value = _typedPicture,
+        },
     ];
 
     public void OnImageBuffersReady(IReadOnlyDictionary<string, IPluginImageWriter> writers)
@@ -166,6 +204,7 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         var node = new PluginContainer("node", "Node");
         node.Entries.Add(_block);
         node.Entries.Add(_status);
+        node.Entries.Add(_stake);
         node.Entries.Add(_heartbeat);
         node.Entries.Add(_price);
         node.Entries.Add(_reward);
@@ -186,6 +225,7 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
 
         if (_stats.HasReward)
             _reward.Value = AlgoFormat.Reward(_stats.LastRewardMicro);
+        _picture.Load(ActivePicture());
     }
 
     public void ApplyConfig(string key, object? value)
@@ -196,15 +236,20 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
                 if (value is string look && LookLabels.Contains(look))
                 {
                     _lookLabel = look;
-                    _look = look switch
-                    {
-                        "Gold" => CelebrationLook.Gold,
-                        "Ice" => CelebrationLook.Ice,
-                        "Ember" => CelebrationLook.Ember,
-                        "Plain" => CelebrationLook.Plain,
-                        _ => CelebrationLook.TealGold,
-                    };
+                    _look = LookFrom(look);
                 }
+                break;
+            case "intro":
+                if (value is string intro && IntroLabels.Contains(intro))
+                    _introLabel = intro;
+                break;
+            case "outro":
+                if (value is string outro && OutroLabels.Contains(outro))
+                    _outroLabel = outro;
+                break;
+            case "picture":
+                _typedPicture = value as string ?? "";
+                _picture.Load(ActivePicture());
                 break;
             case "length":
                 if (value is string length && LengthLabels.Contains(length))
@@ -271,6 +316,7 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         }
 
         _painter.Dispose();
+        _picture.Dispose();
         _prices.Dispose();
         _node.Dispose();
         _lifetime.Dispose();
@@ -351,6 +397,8 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         _status.Value = snapshot.Ready && !snapshot.CatchingUp ? "Synced" : "Syncing";
         if (snapshot.LastRound > 0)
             _block.Value = snapshot.LastRound.ToString();
+        if (snapshot.StakeKnown)
+            _stake.Value = (float)Math.Round(snapshot.StakeMicro / 1_000_000m, 0, MidpointRounding.AwayFromZero);
 
         _keys = snapshot.Keys.ToList();
         UpdateKeyDays(snapshot.LastRound);
@@ -486,6 +534,28 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         return false;
     }
 
+    [PluginAction("Choose celebration picture")]
+    public void ChooseCelebrationPicture()
+    {
+        string? path = PicturePicker.Choose();
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+        CelebrationFile.Save(path);
+        _chosenPicture = path;
+        _picture.Load(ActivePicture());
+        _lookLabel = "Custom picture";
+        _look = CelebrationLook.Custom;
+    }
+
+    [PluginAction("Clear celebration picture")]
+    public void ClearCelebrationPicture()
+    {
+        CelebrationFile.Clear();
+        _chosenPicture = "";
+        _typedPicture = "";
+        _picture.Load(ActivePicture());
+    }
+
     [PluginAction("Test celebration")]
     public void TestCelebration()
     {
@@ -610,7 +680,19 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
             return;
         }
 
-        _painter.Draw(canvas, _rewardWriter.Width, _rewardWriter.Height, t, _fanfare, _fanfareAlgo, _look);
+        double elapsed = (DateTime.UtcNow - _fanfareStartUtc).TotalSeconds;
+        _painter.Draw(
+            canvas,
+            _rewardWriter.Width,
+            _rewardWriter.Height,
+            t,
+            _fanfare,
+            _fanfareAlgo,
+            _look,
+            _introLabel,
+            _outroLabel,
+            _picture,
+            elapsed);
         _rewardWriter.Invalidate();
     }
 
@@ -643,6 +725,29 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         CreatedChart.Draw(canvas, writer.Width, writer.Height, counts);
         writer.Invalidate();
     }
+
+    private string ActivePicture()
+    {
+        if (File.Exists(_typedPicture))
+            return _typedPicture;
+        return File.Exists(_chosenPicture) ? _chosenPicture : "";
+    }
+
+    private static CelebrationLook LookFrom(string label) => label switch
+    {
+        "Gold" => CelebrationLook.Gold,
+        "Ice" => CelebrationLook.Ice,
+        "Ember" => CelebrationLook.Ember,
+        "Plain" => CelebrationLook.Plain,
+        "Burst" => CelebrationLook.Burst,
+        "Medal" => CelebrationLook.Medal,
+        "Ribbon" => CelebrationLook.Ribbon,
+        "Confetti" => CelebrationLook.Confetti,
+        "Ticket" => CelebrationLook.Ticket,
+        "Spotlight" => CelebrationLook.Spotlight,
+        "Custom picture" => CelebrationLook.Custom,
+        _ => CelebrationLook.TealGold,
+    };
 
     private static PluginSensor[] CreateCounters(string prefix, string title)
     {

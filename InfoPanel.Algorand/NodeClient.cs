@@ -82,7 +82,7 @@ internal sealed class NodeClient : IDisposable
         bool ready = health && await GetOkAsync(root + "/ready", token, cancellationToken);
         using var status = await GetJsonAsync(root + "/v2/status", token, cancellationToken);
         if (status == null)
-            return new NodeSnapshot(health, ready, 0, false, [], port, 0);
+            return new NodeSnapshot(health, ready, 0, false, [], port, 0, 0, false);
 
         long round = status.RootElement.TryGetProperty("last-round", out var lastRound) && lastRound.TryGetInt64(out long parsedRound)
             ? parsedRound
@@ -91,8 +91,8 @@ internal sealed class NodeClient : IDisposable
             && catchup.TryGetInt64(out long catchupNs)
             && catchupNs > 0;
         var parts = await ReadParticipationAsync(root, token, cancellationToken);
-        long heartbeat = await ReadLatestHeartbeatAsync(root, token, parts, cancellationToken);
-        return new NodeSnapshot(health, ready, round, catchingUp, parts, port, heartbeat);
+        (long heartbeat, long stakeMicro, bool stakeKnown) = await ReadAccountsAsync(root, token, parts, cancellationToken);
+        return new NodeSnapshot(health, ready, round, catchingUp, parts, port, heartbeat, stakeMicro, stakeKnown);
     }
 
     public async Task<BlockReward?> ReadBlockAsync(string dataDirectory, long round, CancellationToken cancellationToken)
@@ -176,22 +176,27 @@ internal sealed class NodeClient : IDisposable
         return list;
     }
 
-    private async Task<long> ReadLatestHeartbeatAsync(string root, string token, IReadOnlyList<PartKey> keys, CancellationToken cancellationToken)
+    private async Task<(long Heartbeat, long StakeMicro, bool StakeKnown)> ReadAccountsAsync(string root, string token, IReadOnlyList<PartKey> keys, CancellationToken cancellationToken)
     {
         long newest = 0;
+        long stake = 0;
+        bool known = false;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var key in keys)
         {
-            if (key.Address.Length == 0)
+            if (key.Address.Length == 0 || !seen.Add(key.Address))
                 continue;
             using var doc = await GetJsonAsync(root + "/v2/accounts/" + Uri.EscapeDataString(key.Address), token, cancellationToken);
             if (doc == null)
                 continue;
+            known = true;
+            stake += GetLong(doc.RootElement, "amount");
             long value = GetLong(doc.RootElement, "last-heartbeat");
             if (value > newest)
                 newest = value;
         }
 
-        return newest;
+        return (newest, stake, known);
     }
 
     private async Task<bool> GetOkAsync(string url, string token, CancellationToken cancellationToken)
@@ -335,7 +340,9 @@ internal sealed record NodeSnapshot(
     bool CatchingUp,
     IReadOnlyList<PartKey> Keys,
     int Port,
-    long LastHeartbeat);
+    long LastHeartbeat,
+    long StakeMicro,
+    bool StakeKnown);
 
 internal readonly record struct PartKey(string Address, long FirstValid, long LastValid, long LastVote);
 
