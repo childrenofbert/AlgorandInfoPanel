@@ -112,6 +112,11 @@ internal sealed class StatsStore
             Period.Year => TimeSpan.FromDays(365),
             _ => TimeSpan.FromHours(1),
         };
+        return Count(window, now, kind);
+    }
+
+    public int Count(TimeSpan window, DateTimeOffset now, CountKind kind)
+    {
         long start = (now - window).ToUnixTimeSeconds() / 60;
         long end = now.ToUnixTimeSeconds() / 60;
         int total = 0;
@@ -131,6 +136,25 @@ internal sealed class StatsStore
         }
 
         return total;
+    }
+
+    public (long Minute, long Micro)[] Payouts(TimeSpan window, DateTimeOffset now)
+    {
+        long start = (now - window).ToUnixTimeSeconds() / 60;
+        long end = now.ToUnixTimeSeconds() / 60;
+        var found = new List<(long Minute, long Micro)>();
+        lock (_gate)
+        {
+            foreach (var pair in _minutes)
+            {
+                if (pair.Key < start || pair.Key > end || pair.Value.RewardMicro <= 0)
+                    continue;
+                found.Add((pair.Key, pair.Value.RewardMicro));
+            }
+        }
+
+        found.Sort((a, b) => a.Minute.CompareTo(b.Minute));
+        return found.ToArray();
     }
 
     public int[] CreatedByDay(int days, DateTimeOffset now)
@@ -154,6 +178,59 @@ internal sealed class StatsStore
         }
 
         return counts;
+    }
+
+    public long SumReward(TimeSpan window, DateTimeOffset now)
+    {
+        long start = (now - window).ToUnixTimeSeconds() / 60;
+        long end = now.ToUnixTimeSeconds() / 60;
+        long total = 0;
+        lock (_gate)
+        {
+            foreach (var pair in _minutes)
+            {
+                if (pair.Key < start || pair.Key > end || pair.Value.Created == 0)
+                    continue;
+                total += pair.Value.RewardMicro;
+            }
+        }
+
+        return total;
+    }
+
+    public TimeSpan HistoryLength(DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            if (_minutes.Count == 0)
+                return TimeSpan.Zero;
+            long oldest = long.MaxValue;
+            foreach (long key in _minutes.Keys)
+            {
+                if (key < oldest)
+                    oldest = key;
+            }
+
+            long nowMinute = now.ToUnixTimeSeconds() / 60;
+            return TimeSpan.FromMinutes(Math.Max(0, nowMinute - oldest));
+        }
+    }
+
+    public int PayoutStreak(DateTimeOffset now)
+    {
+        var counts = CreatedByDay(400, now);
+        int index = counts.Length - 1;
+        if (index >= 0 && counts[index] == 0)
+            index--;
+        int streak = 0;
+        for (int i = index; i >= 0; i--)
+        {
+            if (counts[i] == 0)
+                break;
+            streak++;
+        }
+
+        return streak;
     }
 
     public void Save()
@@ -308,6 +385,67 @@ internal static class AlgoFormat
     {
         decimal algo = microAlgo / 1_000_000m;
         return algo.ToString("0.000' ALGO'", CultureInfo.InvariantCulture);
+    }
+
+    public static string Share(decimal pct)
+    {
+        string digits = pct >= 1m ? "0.00" : "0.0000";
+        return pct.ToString(digits, CultureInfo.InvariantCulture) + "%";
+    }
+
+    public static string OnlineStake(long microAlgo)
+    {
+        decimal algo = microAlgo / 1_000_000m;
+        if (algo >= 1_000_000_000m)
+            return (algo / 1_000_000_000m).ToString("0.00", CultureInfo.InvariantCulture) + "B ALGO";
+        if (algo >= 1_000_000m)
+            return (algo / 1_000_000m).ToString("0.0", CultureInfo.InvariantCulture) + "M ALGO";
+        long whole = (long)Math.Round(algo, 0, MidpointRounding.AwayFromZero);
+        return whole.ToString(CultureInfo.InvariantCulture) + " ALGO";
+    }
+
+    public static string Behind(long seconds)
+    {
+        if (seconds <= 0)
+            return "0 s";
+        if (seconds < 90)
+            return seconds.ToString(CultureInfo.InvariantCulture) + " s";
+        return Age(TimeSpan.FromSeconds(seconds), "12h 28m");
+    }
+
+    public static string Upgrade(long lastRound, long nextRound, bool supported, double roundSeconds, string version)
+    {
+        if (nextRound <= lastRound || roundSeconds <= 0)
+            return "None scheduled";
+        double days = (nextRound - lastRound) * roundSeconds / 86400d;
+        string when = days >= 2
+            ? $"{Math.Floor(days):0} days"
+            : days >= 1d / 24d
+                ? $"{Math.Max(1, Math.Floor(days * 24)):0} hours"
+                : "soon";
+        string name = version.Length is > 0 and <= 18 && !version.Contains("://", StringComparison.Ordinal)
+            ? version + " "
+            : "";
+        return supported ? name + "in " + when : "Stops in " + when;
+    }
+
+    public static string Expected(double blocks) => blocks.ToString("0.0", CultureInfo.InvariantCulture);
+
+    public static string Luck(double blocks)
+    {
+        if (blocks > 0.05)
+            return "Ahead " + blocks.ToString("0.0", CultureInfo.InvariantCulture);
+        if (blocks < -0.05)
+            return "Behind " + Math.Abs(blocks).ToString("0.0", CultureInfo.InvariantCulture);
+        return "On pace";
+    }
+
+    public static string WinRate(int created, int proposed)
+    {
+        if (proposed <= 0)
+            return "—";
+        decimal pct = created / (decimal)proposed * 100m;
+        return pct.ToString("0.#", CultureInfo.InvariantCulture) + "%";
     }
 
     public static string Percent(decimal pct)

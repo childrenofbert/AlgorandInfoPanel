@@ -82,17 +82,27 @@ internal sealed class NodeClient : IDisposable
         bool ready = health && await GetOkAsync(root + "/ready", token, cancellationToken);
         using var status = await GetJsonAsync(root + "/v2/status", token, cancellationToken);
         if (status == null)
-            return new NodeSnapshot(health, ready, 0, false, [], port, 0, 0, false);
+            return new NodeSnapshot(health, ready, 0, false, [], port, 0, 0, false, 0, null, 0, true, "", 0, false);
 
         long round = status.RootElement.TryGetProperty("last-round", out var lastRound) && lastRound.TryGetInt64(out long parsedRound)
             ? parsedRound
             : 0;
-        bool catchingUp = status.RootElement.TryGetProperty("catchup-time", out var catchup)
-            && catchup.TryGetInt64(out long catchupNs)
-            && catchupNs > 0;
+        long catchupNs = status.RootElement.TryGetProperty("catchup-time", out var catchup) && catchup.TryGetInt64(out long parsedCatchup)
+            ? parsedCatchup
+            : 0;
+        bool catchingUp = catchupNs > 0;
+        long nextRound = GetLong(status.RootElement, "next-version-round");
+        bool nextSupported = !status.RootElement.TryGetProperty("next-version-supported", out var supported)
+            || supported.ValueKind != JsonValueKind.False;
+        string nextVersion = status.RootElement.TryGetProperty("next-version", out var version) && version.ValueKind == JsonValueKind.String
+            ? version.GetString() ?? ""
+            : "";
         var parts = await ReadParticipationAsync(root, token, cancellationToken);
-        (long heartbeat, long stakeMicro, bool stakeKnown) = await ReadAccountsAsync(root, token, parts, cancellationToken);
-        return new NodeSnapshot(health, ready, round, catchingUp, parts, port, heartbeat, stakeMicro, stakeKnown);
+        (long heartbeat, long stakeMicro, bool stakeKnown, bool? eligible) = await ReadAccountsAsync(root, token, parts, cancellationToken);
+        (long onlineMicro, bool supplyKnown) = await ReadSupplyAsync(root, token, cancellationToken);
+        return new NodeSnapshot(
+            health, ready, round, catchingUp, parts, port, heartbeat, stakeMicro, stakeKnown,
+            catchupNs, eligible, nextRound, nextSupported, nextVersion, onlineMicro, supplyKnown);
     }
 
     public async Task<BlockReward?> ReadBlockAsync(string dataDirectory, long round, CancellationToken cancellationToken)
@@ -176,11 +186,12 @@ internal sealed class NodeClient : IDisposable
         return list;
     }
 
-    private async Task<(long Heartbeat, long StakeMicro, bool StakeKnown)> ReadAccountsAsync(string root, string token, IReadOnlyList<PartKey> keys, CancellationToken cancellationToken)
+    private async Task<(long Heartbeat, long StakeMicro, bool StakeKnown, bool? Eligible)> ReadAccountsAsync(string root, string token, IReadOnlyList<PartKey> keys, CancellationToken cancellationToken)
     {
         long newest = 0;
         long stake = 0;
         bool known = false;
+        bool? eligible = null;
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var key in keys)
         {
@@ -194,9 +205,24 @@ internal sealed class NodeClient : IDisposable
             long value = GetLong(doc.RootElement, "last-heartbeat");
             if (value > newest)
                 newest = value;
+            if (doc.RootElement.TryGetProperty("incentive-eligible", out var flag)
+                && flag.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                bool isEligible = flag.GetBoolean();
+                eligible = eligible is null ? isEligible : eligible.Value && isEligible;
+            }
         }
 
-        return (newest, stake, known);
+        return (newest, stake, known, eligible);
+    }
+
+    private async Task<(long Online, bool Known)> ReadSupplyAsync(string root, string token, CancellationToken cancellationToken)
+    {
+        using var doc = await GetJsonAsync(root + "/v2/ledger/supply", token, cancellationToken);
+        if (doc == null)
+            return (0, false);
+        long online = GetLong(doc.RootElement, "online-money");
+        return (online, online > 0);
     }
 
     private async Task<bool> GetOkAsync(string url, string token, CancellationToken cancellationToken)
@@ -342,7 +368,14 @@ internal sealed record NodeSnapshot(
     int Port,
     long LastHeartbeat,
     long StakeMicro,
-    bool StakeKnown);
+    bool StakeKnown,
+    long CatchupNs,
+    bool? IncentiveEligible,
+    long NextVersionRound,
+    bool NextVersionSupported,
+    string NextVersion,
+    long OnlineMicro,
+    bool SupplyKnown);
 
 internal readonly record struct PartKey(string Address, long FirstValid, long LastValid, long LastVote);
 

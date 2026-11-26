@@ -83,6 +83,20 @@ internal sealed class PriceHistory : IDisposable
         }
     }
 
+    public decimal? PriceAt(DateTimeOffset when)
+    {
+        long minute = when.ToUnixTimeSeconds() / 60;
+        lock (_gate)
+        {
+            int index = Floor(minute);
+            if (index < 0)
+                return null;
+            if (minute - _ticks[index].Minute > 180)
+                return null;
+            return _ticks[index].Scaled / (decimal)Scale;
+        }
+    }
+
     public (long Unix, decimal Price)[] Window(TimeSpan window, bool hourly)
     {
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();

@@ -28,19 +28,41 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
 
     private readonly PluginText _block = new("block", "Current block", "—");
     private readonly PluginText _status = new("status", "Status", "Stopped");
+    private readonly PluginText _mood = new("mood", "Mood", "—");
     private readonly PluginSensor _stake = new("stake", "Current stake", 0, "ALGO");
+    private readonly PluginText _stakeUsd = new("stake-usd", "Stake in dollars", "—");
     private readonly PluginText _heartbeat = new("heartbeat-age", "Time since heartbeat", "—");
+    private readonly PluginText _voteAge = new("vote-age", "Time since last vote", "—");
+    private readonly PluginText _incentive = new("incentive", "Incentive eligible", "—");
+    private readonly PluginText _behind = new("behind", "Seconds behind", "—");
+    private readonly PluginText _upgrade = new("upgrade", "Upgrade due", "—");
+    private readonly PluginText _blockTime = new("block-time", "Block time", "—");
     private readonly PluginText _price = new("price", "ALGO price", "—");
     private readonly PluginText _changeHour = new("price-change-hour", "Change past hour", "—");
     private readonly PluginText _changeDay = new("price-change-day", "Change past 24 hours", "—");
     private readonly PluginText _changeWeek = new("price-change-week", "Change past 7 days", "—");
     private readonly PluginText _changeMonth = new("price-change-month", "Change past 30 days", "—");
     private readonly PluginText _reward = new("last-reward", "Last reward", "—");
+    private readonly PluginText _payoutUsd = new("payout-usd", "Last payout in dollars", "—");
     private readonly PluginText _sinceBlock = new("since-block", "Time since last block", "—");
     private readonly PluginText _keyDays = new("key-days", "Key days left", "—");
     private readonly PluginSensor[] _votes = CreateCounters("votes", "Votes");
     private readonly PluginSensor[] _proposed = CreateCounters("proposed", "Blocks proposed");
     private readonly PluginSensor[] _created = CreateCounters("created", "Blocks created");
+    private readonly PluginText[] _winRate = CreateTexts("win", "Win rate");
+    private readonly PluginText _earnedDay = new("earned-day", "Earned past 24 hours", "—");
+    private readonly PluginText _earnedWeek = new("earned-week", "Earned past 7 days", "—");
+    private readonly PluginText _earnedMonth = new("earned-month", "Earned past 30 days", "—");
+    private readonly PluginText _earnedDayUsd = new("earned-day-usd", "Earned past 24 hours in dollars", "—");
+    private readonly PluginText _earnedWeekUsd = new("earned-week-usd", "Earned past 7 days in dollars", "—");
+    private readonly PluginText _earnedMonthUsd = new("earned-month-usd", "Earned past 30 days in dollars", "—");
+    private readonly PluginText _expectedDay = new("expected-day", "Expected past 24 hours", "—");
+    private readonly PluginText _expectedWeek = new("expected-week", "Expected past 7 days", "—");
+    private readonly PluginText _expectedMonth = new("expected-month", "Expected past 30 days", "—");
+    private readonly PluginText _luck = new("luck-today", "Luck today", "—");
+    private readonly PluginText _streak = new("streak", "Payout streak", "—");
+    private readonly PluginText _onlineStake = new("online-stake", "Online stake", "—");
+    private readonly PluginText _share = new("stake-share", "Your share of online stake", "—");
 
     private readonly NodeClient _node = new();
     private readonly StatsStore _stats = new();
@@ -74,12 +96,25 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
     private double _roundSeconds = 2.9;
     private DateTime _roundSampleUtc;
     private long _roundSample;
-    private DateTimeOffset? _heartbeatUtc;
-    private long _heartbeatRound;
-    private long _heartbeatAtRound;
-    private double _heartbeatPace;
     private List<PartKey> _keys = [];
     private string _priceText = "—";
+    private decimal _priceUsd;
+    private readonly RoundClock _heartbeatClock = new();
+    private readonly RoundClock _voteClock = new();
+    private bool _paceKnown;
+    private long _stakeMicro;
+    private bool _stakeKnown;
+    private long _onlineMicro;
+    private bool _supplyKnown;
+    private bool? _eligible;
+    private long _catchupNs;
+    private bool _statusKnown;
+    private long _statusRound;
+    private long _nextRound;
+    private bool _nextSupported = true;
+    private string _nextVersion = "";
+    private bool _luckKnown;
+    private double _luckDelta;
 
     private FanfareKind _fanfare = FanfareKind.None;
     private DateTime _fanfareStartUtc;
@@ -103,6 +138,11 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         new PluginImageDescriptor("price-30d", "Price past 30 days", 800, 200),
         new PluginImageDescriptor("created-7d", "Blocks created past 7 days", 800, 200),
         new PluginImageDescriptor("created-30d", "Blocks created past 30 days", 800, 200),
+        new PluginImageDescriptor("luck-meter", "Luck meter", 800, 160),
+        new PluginImageDescriptor("streak-marks", "Payout streak", 800, 150),
+        new PluginImageDescriptor("stake-bar", "Share of online stake", 800, 130),
+        new PluginImageDescriptor("upgrade-ring", "Upgrade countdown", 800, 200),
+        new PluginImageDescriptor("payout-spark", "Payout marks", 800, 160),
     ];
 
     public IReadOnlyList<PluginConfigProperty> ConfigProperties =>
@@ -163,7 +203,7 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         {
             Key = "timeFormat",
             DisplayName = "Time format",
-            Description = "How the heartbeat and last-block clocks are written. Every copy uses this style.",
+            Description = "How the heartbeat, vote, and last-block clocks are written. Every copy uses this style.",
             Type = PluginConfigType.Choice,
             Value = _timeFormat,
             Options = TimeFormats,
@@ -204,8 +244,15 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         var node = new PluginContainer("node", "Node");
         node.Entries.Add(_block);
         node.Entries.Add(_status);
+        node.Entries.Add(_mood);
         node.Entries.Add(_stake);
+        node.Entries.Add(_stakeUsd);
         node.Entries.Add(_heartbeat);
+        node.Entries.Add(_voteAge);
+        node.Entries.Add(_incentive);
+        node.Entries.Add(_behind);
+        node.Entries.Add(_upgrade);
+        node.Entries.Add(_blockTime);
         node.Entries.Add(_price);
         node.Entries.Add(_reward);
         node.Entries.Add(_sinceBlock);
@@ -215,6 +262,30 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         containers.Add(Folder("votes", "Votes", _votes));
         containers.Add(Folder("proposed", "Blocks proposed", _proposed));
         containers.Add(Folder("created", "Blocks created", _created));
+        containers.Add(TextFolder("win", "Win rate", _winRate));
+
+        var earnings = new PluginContainer("earnings", "Earnings");
+        earnings.Entries.Add(_earnedDay);
+        earnings.Entries.Add(_earnedWeek);
+        earnings.Entries.Add(_earnedMonth);
+        earnings.Entries.Add(_earnedDayUsd);
+        earnings.Entries.Add(_earnedWeekUsd);
+        earnings.Entries.Add(_earnedMonthUsd);
+        earnings.Entries.Add(_payoutUsd);
+        containers.Add(earnings);
+
+        var outlook = new PluginContainer("outlook", "Outlook");
+        outlook.Entries.Add(_expectedDay);
+        outlook.Entries.Add(_expectedWeek);
+        outlook.Entries.Add(_expectedMonth);
+        outlook.Entries.Add(_luck);
+        outlook.Entries.Add(_streak);
+        containers.Add(outlook);
+
+        var network = new PluginContainer("network", "Network");
+        network.Entries.Add(_onlineStake);
+        network.Entries.Add(_share);
+        containers.Add(network);
 
         var price = new PluginContainer("price", "Price");
         price.Entries.Add(_changeHour);
@@ -281,6 +352,7 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
 
         RefreshCounts();
         RefreshClocks();
+        RefreshInsights();
         _price.Value = _priceText;
         RefreshPriceChanges();
         DrawFrame();
@@ -398,12 +470,37 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         if (snapshot.LastRound > 0)
             _block.Value = snapshot.LastRound.ToString();
         if (snapshot.StakeKnown)
+        {
+            _stakeKnown = true;
+            _stakeMicro = snapshot.StakeMicro;
             _stake.Value = (float)Math.Round(snapshot.StakeMicro / 1_000_000m, 0, MidpointRounding.AwayFromZero);
+        }
+
+        _statusKnown = true;
+        _statusRound = snapshot.LastRound;
+        _catchupNs = snapshot.CatchupNs;
+        _eligible = snapshot.IncentiveEligible;
+        _nextRound = snapshot.NextVersionRound;
+        _nextSupported = snapshot.NextVersionSupported;
+        _nextVersion = snapshot.NextVersion;
+        if (snapshot.SupplyKnown)
+        {
+            _supplyKnown = true;
+            _onlineMicro = snapshot.OnlineMicro;
+        }
 
         _keys = snapshot.Keys.ToList();
         UpdateKeyDays(snapshot.LastRound);
         NoteRoundPace(snapshot.LastRound);
-        NoteHeartbeat(snapshot.LastHeartbeat, snapshot.LastRound);
+        _heartbeatClock.Note(snapshot.LastHeartbeat, snapshot.LastRound, _roundSeconds);
+        long lastVote = 0;
+        foreach (var key in snapshot.Keys)
+        {
+            if (key.LastVote > lastVote)
+                lastVote = key.LastVote;
+        }
+
+        _voteClock.Note(lastVote, snapshot.LastRound, _roundSeconds);
 
         if (_scanDone)
             TailLog(dataDir, cancellationToken);
@@ -486,41 +583,161 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         {
             double seconds = (now - _roundSampleUtc).TotalSeconds / (round - _roundSample);
             if (seconds is > 0.5 and < 10)
+            {
                 _roundSeconds = seconds;
+                _paceKnown = true;
+            }
         }
 
         _roundSample = round;
         _roundSampleUtc = now;
     }
 
-    private void NoteHeartbeat(long heartbeatRound, long lastRound)
-    {
-        if (heartbeatRound <= 0 || lastRound < heartbeatRound)
-            return;
-
-        bool changed = heartbeatRound != _heartbeatRound
-            || lastRound != _heartbeatAtRound
-            || Math.Abs(_roundSeconds - _heartbeatPace) > 0.05;
-        if (!changed && _heartbeatUtc.HasValue)
-            return;
-
-        double ageSeconds = (lastRound - heartbeatRound) * _roundSeconds;
-        _heartbeatUtc = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(ageSeconds);
-        _heartbeatRound = heartbeatRound;
-        _heartbeatAtRound = lastRound;
-        _heartbeatPace = _roundSeconds;
-    }
-
     private void RefreshClocks()
     {
-        _heartbeat.Value = _heartbeatUtc is DateTimeOffset heartbeat
-            ? AlgoFormat.Age(DateTimeOffset.UtcNow - heartbeat, _timeFormat)
+        _heartbeat.Value = _heartbeatClock.Text(_timeFormat);
+        _voteAge.Value = _voteClock.Text(_timeFormat);
+        _blockTime.Value = _paceKnown
+            ? _roundSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " s"
             : "—";
 
         long createdUnix = _stats.LastCreatedUnix;
         _sinceBlock.Value = createdUnix > 0
             ? AlgoFormat.Age(DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeSeconds(createdUnix), _timeFormat)
             : "—";
+    }
+
+    private void RefreshInsights()
+    {
+        var now = DateTimeOffset.UtcNow;
+        decimal price;
+        lock (_priceGate)
+            price = _priceUsd;
+
+        _stakeUsd.Value = _stakeKnown && price > 0
+            ? AlgoFormat.Price(Math.Round(_stakeMicro / 1_000_000m, 0, MidpointRounding.AwayFromZero) * price)
+            : "—";
+        _incentive.Value = _eligible switch
+        {
+            true => "Yes",
+            false => "No",
+            _ => "—",
+        };
+        _behind.Value = _statusKnown ? AlgoFormat.Behind(_catchupNs / 1_000_000_000) : "—";
+        _upgrade.Value = _statusKnown
+            ? AlgoFormat.Upgrade(_statusRound, _nextRound, _nextSupported, _roundSeconds, _nextVersion)
+            : "—";
+        _onlineStake.Value = _supplyKnown ? AlgoFormat.OnlineStake(_onlineMicro) : "—";
+        _share.Value = _supplyKnown && _stakeKnown && _onlineMicro > 0
+            ? AlgoFormat.Share(_stakeMicro / (decimal)_onlineMicro * 100m)
+            : "—";
+
+        ShowEarned(_earnedDay, _earnedDayUsd, TimeSpan.FromHours(24), price);
+        ShowEarned(_earnedWeek, _earnedWeekUsd, TimeSpan.FromDays(7), price);
+        ShowEarned(_earnedMonth, _earnedMonthUsd, TimeSpan.FromDays(30), price);
+        _payoutUsd.Value = PayoutDollars(price);
+
+        for (int i = 0; i < Periods.Length; i++)
+        {
+            int proposed = _stats.Count(Periods[i].Period, now, CountKind.Proposals);
+            int created = _stats.Count(Periods[i].Period, now, CountKind.Created);
+            _winRate[i].Value = AlgoFormat.WinRate(created, proposed);
+        }
+
+        _expectedDay.Value = ExpectedText(TimeSpan.FromHours(24));
+        _expectedWeek.Value = ExpectedText(TimeSpan.FromDays(7));
+        _expectedMonth.Value = ExpectedText(TimeSpan.FromDays(30));
+        _luck.Value = LuckText(now);
+        _streak.Value = _stats.PayoutStreak(now).ToString(System.Globalization.CultureInfo.InvariantCulture) + " days";
+        _mood.Value = MoodText(now);
+    }
+
+    private void ShowEarned(PluginText algoText, PluginText dollarText, TimeSpan window, decimal price)
+    {
+        long micro = _stats.SumReward(window, DateTimeOffset.UtcNow);
+        algoText.Value = AlgoFormat.Reward(micro);
+        dollarText.Value = price > 0 ? AlgoFormat.Price(micro / 1_000_000m * price) : "—";
+    }
+
+    private string PayoutDollars(decimal currentPrice)
+    {
+        if (!_stats.HasReward || _stats.LastRewardMicro <= 0)
+            return "—";
+        decimal price = currentPrice;
+        if (_stats.LastCreatedUnix > 0)
+            price = _prices.PriceAt(DateTimeOffset.FromUnixTimeSeconds(_stats.LastCreatedUnix)) ?? currentPrice;
+        if (price <= 0)
+            return "—";
+        return AlgoFormat.Price(_stats.LastRewardMicro / 1_000_000m * price);
+    }
+
+    private string ExpectedText(TimeSpan window)
+    {
+        if (!TryExpected(window, out double expected))
+            return "—";
+        return AlgoFormat.Expected(expected);
+    }
+
+    private string LuckText(DateTimeOffset now)
+    {
+        if (!TryExpected(TimeSpan.FromHours(24), out double expected))
+        {
+            _luckKnown = false;
+            _luckDelta = 0;
+            return "—";
+        }
+
+        int actual = _stats.Count(Period.Day, now, CountKind.Created);
+        _luckKnown = true;
+        _luckDelta = actual - expected;
+        return AlgoFormat.Luck(_luckDelta);
+    }
+
+    private string MoodText(DateTimeOffset now)
+    {
+        if (_status.Value == "Stopped")
+            return "Offline";
+        if (_status.Value == "Syncing" || (_statusKnown && _catchupNs > 30_000_000_000L))
+            return "Catching up";
+        if (UpgradeSoon())
+            return "Upgrade soon";
+
+        var observed = _stats.HistoryLength(now);
+        if (observed < TimeSpan.FromHours(6))
+            return "Calm";
+
+        int recent = _stats.Count(TimeSpan.FromHours(6), now, CountKind.Votes);
+        if (recent == 0)
+            return "Quiet";
+
+        int hour = _stats.Count(Period.Hour, now, CountKind.Votes);
+        int day = _stats.Count(Period.Day, now, CountKind.Votes);
+        double usualHour = day / 24d;
+        if (hour >= 3 && hour >= usualHour * 2d)
+            return "Busy";
+        return "Calm";
+    }
+
+    private bool UpgradeSoon()
+    {
+        if (!_statusKnown || _nextRound <= _statusRound || _roundSeconds <= 0)
+            return false;
+        double days = (_nextRound - _statusRound) * _roundSeconds / 86400d;
+        return days < 7d || !_nextSupported;
+    }
+
+    private bool TryExpected(TimeSpan window, out double expected)
+    {
+        expected = 0;
+        if (!_paceKnown || !_supplyKnown || !_stakeKnown || _onlineMicro <= 0 || _roundSeconds <= 0)
+            return false;
+        var observed = _stats.HistoryLength(DateTimeOffset.UtcNow);
+        if (observed < TimeSpan.FromMinutes(30))
+            return false;
+        double fraction = Math.Min(1d, observed.TotalSeconds / window.TotalSeconds);
+        double share = _stakeMicro / (double)_onlineMicro;
+        expected = share * (window.TotalSeconds / _roundSeconds) * fraction;
+        return true;
     }
 
     private bool IsOurs(string proposer)
@@ -617,7 +834,10 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
                     _prices.Add(DateTimeOffset.UtcNow, amount);
                     string text = AlgoFormat.Price(amount);
                     lock (_priceGate)
+                    {
+                        _priceUsd = amount;
                         _priceText = text;
+                    }
                     _prices.Save();
                 }
             }
@@ -704,6 +924,93 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         DrawOneChart("price-30d", "PAST 30 DAYS", TimeSpan.FromDays(30), hourly: true, now);
         DrawCreatedChart("created-7d", 7);
         DrawCreatedChart("created-30d", 30);
+        DrawLuck();
+        DrawStreak();
+        DrawShare();
+        DrawUpgrade();
+        DrawSpark();
+    }
+
+    private void DrawLuck()
+    {
+        if (!_chartWriters.TryGetValue("luck-meter", out var writer))
+            return;
+        using var canvas = new SKCanvas(writer.Bitmap);
+        SceneArt.Luck(canvas, writer.Width, writer.Height, _luckKnown, _luckDelta, _luck.Value);
+        writer.Invalidate();
+    }
+
+    private void DrawStreak()
+    {
+        if (!_chartWriters.TryGetValue("streak-marks", out var writer))
+            return;
+        var now = DateTimeOffset.Now;
+        using var canvas = new SKCanvas(writer.Bitmap);
+        SceneArt.Streak(canvas, writer.Width, writer.Height, _stats.CreatedByDay(14, now), _stats.PayoutStreak(now));
+        writer.Invalidate();
+    }
+
+    private void DrawShare()
+    {
+        if (!_chartWriters.TryGetValue("stake-bar", out var writer))
+            return;
+        bool known = _supplyKnown && _stakeKnown && _onlineMicro > 0;
+        decimal pct = known ? _stakeMicro / (decimal)_onlineMicro * 100m : 0;
+        float full = pct >= 10m ? 100f : pct >= 1m ? 10f : pct >= 0.1m ? 1f : 0.1f;
+        string scale = full >= 100f
+            ? "of online stake"
+            : "full bar is " + (full < 1f
+                ? full.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)
+                : full.ToString("0", System.Globalization.CultureInfo.InvariantCulture)) + "%";
+        using var canvas = new SKCanvas(writer.Bitmap);
+        SceneArt.Share(canvas, writer.Width, writer.Height, known, known ? AlgoFormat.Share(pct) : "—", known ? (float)(pct / (decimal)full) : 0, scale);
+        writer.Invalidate();
+    }
+
+    private void DrawUpgrade()
+    {
+        if (!_chartWriters.TryGetValue("upgrade-ring", out var writer))
+            return;
+        float fill = 0;
+        string center = "—";
+        string side = "Waiting";
+        bool alert = false;
+        if (_statusKnown)
+        {
+            side = AlgoFormat.Upgrade(_statusRound, _nextRound, _nextSupported, _roundSeconds, _nextVersion);
+            if (_nextRound > _statusRound && _roundSeconds > 0)
+            {
+                double days = (_nextRound - _statusRound) * _roundSeconds / 86400d;
+                fill = 1f - Math.Clamp((float)(days / 30d), 0f, 1f);
+                center = days >= 2d
+                    ? Math.Floor(days).ToString("0", System.Globalization.CultureInfo.InvariantCulture)
+                    : days >= 1d / 24d
+                        ? Math.Max(1, Math.Floor(days * 24d)).ToString("0", System.Globalization.CultureInfo.InvariantCulture) + "h"
+                        : "Now";
+                alert = !_nextSupported;
+            }
+            else
+            {
+                center = "—";
+                side = "None scheduled";
+            }
+        }
+
+        using var canvas = new SKCanvas(writer.Bitmap);
+        SceneArt.Upgrade(canvas, writer.Width, writer.Height, fill, alert, center, side);
+        writer.Invalidate();
+    }
+
+    private void DrawSpark()
+    {
+        if (!_chartWriters.TryGetValue("payout-spark", out var writer))
+            return;
+        var now = DateTimeOffset.UtcNow;
+        long to = now.ToUnixTimeSeconds() / 60;
+        long from = to - 30L * 24L * 60L;
+        using var canvas = new SKCanvas(writer.Bitmap);
+        SceneArt.Spark(canvas, writer.Width, writer.Height, _stats.Payouts(TimeSpan.FromDays(30), now), from, to);
+        writer.Invalidate();
     }
 
     private void DrawOneChart(string id, string title, TimeSpan window, bool hourly, long now)
@@ -748,6 +1055,26 @@ public sealed class AlgorandPlugin : BasePlugin, IPluginImageProvider, IPluginCo
         "Custom picture" => CelebrationLook.Custom,
         _ => CelebrationLook.TealGold,
     };
+
+    private static PluginText[] CreateTexts(string prefix, string title)
+    {
+        var sensors = new PluginText[Periods.Length];
+        for (int i = 0; i < Periods.Length; i++)
+        {
+            var period = Periods[i];
+            sensors[i] = new PluginText($"{prefix}-{period.Id}", $"{title} {period.Name}", "—");
+        }
+
+        return sensors;
+    }
+
+    private static PluginContainer TextFolder(string id, string name, PluginText[] sensors)
+    {
+        var container = new PluginContainer(id, name);
+        foreach (var sensor in sensors)
+            container.Entries.Add(sensor);
+        return container;
+    }
 
     private static PluginSensor[] CreateCounters(string prefix, string title)
     {
